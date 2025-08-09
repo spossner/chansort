@@ -32,17 +32,18 @@ var tuiCmd = &cobra.Command{
 }
 
 type model struct {
-	channels       []scm.Record
-	cursor         int
-	viewportTop    int
-	height         int
-	searchBuffer   string
-	searchTimer    *time.Timer
-	searchTimerID  int
-	lastSearchTerm string
-	toastMessage   string
-	toastTimer     *time.Timer
-	toastTimerID   int
+	channels         []scm.Record
+	filteredChannels []scm.Record
+	cursor           int
+	viewportTop      int
+	height           int
+	searchBuffer     string
+	searchTimer      *time.Timer
+	searchTimerID    int
+	lastSearchTerm   string
+	toastMessage     string
+	toastTimer       *time.Timer
+	toastTimerID     int
 }
 
 type clearSearchMsg struct {
@@ -54,17 +55,18 @@ type clearToastMsg struct {
 
 func initialModel(channels []scm.Record) model {
 	return model{
-		channels:       channels,
-		cursor:         0,
-		viewportTop:    0,
-		height:         25, // default height, will be updated on window size msg
-		searchBuffer:   "",
-		searchTimer:    nil,
-		searchTimerID:  0,
-		lastSearchTerm: "",
-		toastMessage:   "",
-		toastTimer:     nil,
-		toastTimerID:   0,
+		channels:         channels,
+		filteredChannels: channels, // initially show all channels
+		cursor:           0,
+		viewportTop:      0,
+		height:           25, // default height, will be updated on window size msg
+		searchBuffer:     "",
+		searchTimer:      nil,
+		searchTimerID:    0,
+		lastSearchTerm:   "",
+		toastMessage:     "",
+		toastTimer:       nil,
+		toastTimerID:     0,
 	}
 }
 
@@ -97,19 +99,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-		case "up", "k":
-			// Clear search buffer on navigation
+		case "escape":
+			// Reset filter and clear search
 			m.searchBuffer = ""
+			m.filteredChannels = m.channels
+			m.cursor = 0
+			m.viewportTop = 0
 			m = m.clearSearchTimer()
+		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 				m = m.updateViewport()
 			}
 		case "down", "j":
-			// Clear search buffer on navigation
-			m.searchBuffer = ""
-			m = m.clearSearchTimer()
-			if m.cursor < len(m.channels)-1 {
+			if m.cursor < len(m.filteredChannels)-1 {
 				m.cursor++
 				m = m.updateViewport()
 			}
@@ -117,6 +120,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.searchBuffer) > 0 {
 				m.searchBuffer = m.searchBuffer[:len(m.searchBuffer)-1]
 				m = m.clearSearchTimer()
+				
+				// Update filter and reset cursor
+				m.filteredChannels = m.filterChannels(m.searchBuffer)
+				m.cursor = 0
+				m.viewportTop = 0
+				m = m.updateViewport()
+				
 				if m.searchBuffer != "" {
 					return m.startSearchTimer()
 				}
@@ -141,16 +151,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.clearSearchTimer()
 				m.searchBuffer += msg.String()
 
-				var toastCmd tea.Cmd
-				// Find next matching channel
-				newCursor, ok := m.searchNext(m.searchBuffer, m.cursor)
-				if !ok {
-					m, toastCmd = m.showToast(fmt.Sprintf("Not found: '%s'", m.searchBuffer))
+				// Update filter
+				m.filteredChannels = m.filterChannels(m.searchBuffer)
+				
+				// Reset cursor to first match if available
+				if len(m.filteredChannels) > 0 {
+					m.cursor = 0
+				} else {
+					m.cursor = 0
 				}
+				m.viewportTop = 0
+				m = m.updateViewport()
 
-				if newCursor != m.cursor {
-					m.cursor = newCursor
-					m = m.updateViewport()
+				var toastCmd tea.Cmd
+				if len(m.filteredChannels) == 0 {
+					m, toastCmd = m.showToast(fmt.Sprintf("No matches for: '%s'", m.searchBuffer))
 				}
 
 				// Save search term when buffer is cleared
@@ -190,23 +205,41 @@ func (m model) updateViewport() model {
 	return m
 }
 
+func (m model) filterChannels(query string) []scm.Record {
+	if query == "" {
+		return m.channels
+	}
+
+	query = strings.ToLower(query)
+	var filtered []scm.Record
+
+	for _, channel := range m.channels {
+		if strings.Contains(strings.ToLower(channel.Name), query) {
+			filtered = append(filtered, channel)
+		}
+	}
+
+	return filtered
+}
+
 func (m model) searchNext(query string, start int) (int, bool) {
 	if query == "" {
 		return m.cursor, false
 	}
 
 	query = strings.ToLower(query)
+	channels := m.filteredChannels
 
 	// Search from start position to end
-	for i := start; i < len(m.channels); i++ {
-		if strings.Contains(strings.ToLower(m.channels[i].Name), query) {
+	for i := start; i < len(channels); i++ {
+		if strings.Contains(strings.ToLower(channels[i].Name), query) {
 			return i, true
 		}
 	}
 
 	// Wrap around: search from beginning to current position
 	for i := 0; i < m.cursor; i++ {
-		if strings.Contains(strings.ToLower(m.channels[i].Name), query) {
+		if strings.Contains(strings.ToLower(channels[i].Name), query) {
 			return i, true
 		}
 	}
@@ -269,16 +302,16 @@ func (m model) View() string {
 	b.WriteString(strings.Repeat("─", 50))
 	b.WriteString("\n")
 
-	// Calculate visible range
+	// Calculate visible range for filtered channels
 	start := m.viewportTop
 	end := m.viewportTop + m.height
-	if end > len(m.channels) {
-		end = len(m.channels)
+	if end > len(m.filteredChannels) {
+		end = len(m.filteredChannels)
 	}
 
-	// Display only visible channels
+	// Display only visible filtered channels
 	for i := start; i < end; i++ {
-		channel := m.channels[i]
+		channel := m.filteredChannels[i]
 		line := fmt.Sprintf("%-4d %-6d %s", channel.LCN, channel.SlotIndex, channel.Name)
 
 		if i == m.cursor {
@@ -291,14 +324,16 @@ func (m model) View() string {
 
 	// Add scroll indicator and search info
 	scrollInfo := ""
-	if len(m.channels) > m.height {
-		scrollInfo = fmt.Sprintf(" • %d/%d", m.cursor+1, len(m.channels))
+	if len(m.filteredChannels) > m.height {
+		scrollInfo = fmt.Sprintf(" • %d/%d", m.cursor+1, len(m.filteredChannels))
+	}
+	
+	// Show filter info if active
+	filterInfo := ""
+	if len(m.filteredChannels) < len(m.channels) {
+		filterInfo = fmt.Sprintf(" • %d/%d matches", len(m.filteredChannels), len(m.channels))
 	}
 
-	searchInfo := ""
-	if m.searchBuffer != "" {
-		searchInfo = fmt.Sprintf(" • searching: '%s'", m.searchBuffer)
-	}
 
 	// Show toast message if present
 	if m.toastMessage != "" {
@@ -313,9 +348,10 @@ func (m model) View() string {
 
 	// show standard status bar
 	if m.searchBuffer != "" {
-		b.WriteString(lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("Searching '%s'", m.searchBuffer)))
+		b.WriteString(lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("Filtering: '%s'%s", m.searchBuffer, filterInfo)))
 	} else {
-		b.WriteString(lipgloss.NewStyle().Faint(true).Render("Press ↑/↓ or j/k to navigate • type to search • n for next match • q to quit" + scrollInfo + searchInfo))
+		helpText := "Press ↑/↓ or j/k to navigate • type to filter • ESC to reset • n for next match • q to quit"
+		b.WriteString(lipgloss.NewStyle().Faint(true).Render(helpText + scrollInfo + filterInfo))
 	}
 
 	return b.String()
