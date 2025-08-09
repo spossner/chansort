@@ -99,13 +99,53 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-		case "escape":
+		case "esc":
+			// Find the currently selected channel in the full list
+			var selectedChannel *scm.Record
+			if m.cursor < len(m.filteredChannels) {
+				selectedChannel = &m.filteredChannels[m.cursor]
+			}
+			
+			// Calculate current screen position
+			screenPosition := m.cursor - m.viewportTop
+			
 			// Reset filter and clear search
 			m.searchBuffer = ""
 			m.filteredChannels = m.channels
-			m.cursor = 0
-			m.viewportTop = 0
 			m = m.clearSearchTimer()
+			
+			// Find the selected channel's position in the full list
+			newCursor := 0
+			if selectedChannel != nil {
+				for i, channel := range m.channels {
+					if channel.LCN == selectedChannel.LCN && channel.SlotIndex == selectedChannel.SlotIndex {
+						newCursor = i
+						break
+					}
+				}
+			}
+			
+			// Set cursor and adjust viewport to maintain screen position
+			m.cursor = newCursor
+			
+			// Try to maintain the same screen position
+			targetViewportTop := m.cursor - screenPosition
+			
+			// Ensure viewport is within bounds
+			maxViewportTop := len(m.channels) - m.height
+			if maxViewportTop < 0 {
+				maxViewportTop = 0
+			}
+			
+			if targetViewportTop < 0 {
+				m.viewportTop = 0
+			} else if targetViewportTop > maxViewportTop {
+				m.viewportTop = maxViewportTop
+			} else {
+				m.viewportTop = targetViewportTop
+			}
+			
+			m = m.updateViewport()
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -120,13 +160,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.searchBuffer) > 0 {
 				m.searchBuffer = m.searchBuffer[:len(m.searchBuffer)-1]
 				m = m.clearSearchTimer()
-				
+
 				// Update filter and reset cursor
 				m.filteredChannels = m.filterChannels(m.searchBuffer)
 				m.cursor = 0
 				m.viewportTop = 0
 				m = m.updateViewport()
-				
+
 				if m.searchBuffer != "" {
 					return m.startSearchTimer()
 				}
@@ -153,7 +193,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				// Update filter
 				m.filteredChannels = m.filterChannels(m.searchBuffer)
-				
+
 				// Reset cursor to first match if available
 				if len(m.filteredChannels) > 0 {
 					m.cursor = 0
@@ -327,13 +367,12 @@ func (m model) View() string {
 	if len(m.filteredChannels) > m.height {
 		scrollInfo = fmt.Sprintf(" • %d/%d", m.cursor+1, len(m.filteredChannels))
 	}
-	
+
 	// Show filter info if active
 	filterInfo := ""
 	if len(m.filteredChannels) < len(m.channels) {
 		filterInfo = fmt.Sprintf(" • %d/%d matches", len(m.filteredChannels), len(m.channels))
 	}
-
 
 	// Show toast message if present
 	if m.toastMessage != "" {
