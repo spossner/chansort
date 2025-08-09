@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,21 +100,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-		case "esc":
+		case "esc", "enter":
 			// Find the currently selected channel in the full list
 			var selectedChannel *scm.Record
 			if m.cursor < len(m.filteredChannels) {
 				selectedChannel = &m.filteredChannels[m.cursor]
 			}
-			
+
 			// Calculate current screen position
 			screenPosition := m.cursor - m.viewportTop
-			
+
 			// Reset filter and clear search
 			m.searchBuffer = ""
 			m.filteredChannels = m.channels
 			m = m.clearSearchTimer()
-			
+
 			// Find the selected channel's position in the full list
 			newCursor := 0
 			if selectedChannel != nil {
@@ -124,19 +125,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			
+
 			// Set cursor and adjust viewport to maintain screen position
 			m.cursor = newCursor
-			
+
 			// Try to maintain the same screen position
 			targetViewportTop := m.cursor - screenPosition
-			
+
 			// Ensure viewport is within bounds
 			maxViewportTop := len(m.channels) - m.height
 			if maxViewportTop < 0 {
 				maxViewportTop = 0
 			}
-			
+
 			if targetViewportTop < 0 {
 				m.viewportTop = 0
 			} else if targetViewportTop > maxViewportTop {
@@ -144,7 +145,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.viewportTop = targetViewportTop
 			}
-			
+
 			m = m.updateViewport()
 		case "up", "k":
 			if m.cursor > 0 {
@@ -161,15 +162,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchBuffer = m.searchBuffer[:len(m.searchBuffer)-1]
 				m = m.clearSearchTimer()
 
-				// Update filter and reset cursor
-				m.filteredChannels = m.filterChannels(m.searchBuffer)
-				m.cursor = 0
-				m.viewportTop = 0
-				m = m.updateViewport()
+				var toastCmd tea.Cmd
+
+				if m.searchBuffer == "" {
+					// Empty search buffer - reset to full list
+					m.filteredChannels = m.channels
+					m.cursor = 0
+					m.viewportTop = 0
+					m = m.updateViewport()
+				} else if m.isNumeric(m.searchBuffer) {
+					// Still numeric after backspace - try to navigate to LCN
+					lcn, _ := strconv.Atoi(m.searchBuffer)
+					newCursor, found := m.findChannelByLCN(lcn)
+
+					if found {
+						m.cursor = newCursor
+						m = m.updateViewport()
+					} else {
+						m, toastCmd = m.showToast(fmt.Sprintf("Channel %d not found", lcn))
+					}
+				} else {
+					// Now text mode - update filter
+					m.filteredChannels = m.filterChannels(m.searchBuffer)
+					m.cursor = 0
+					m.viewportTop = 0
+					m = m.updateViewport()
+
+					if len(m.filteredChannels) == 0 {
+						m, toastCmd = m.showToast(fmt.Sprintf("No matches for: '%s'", m.searchBuffer))
+					}
+				}
 
 				if m.searchBuffer != "" {
-					return m.startSearchTimer()
+					m, searchCmd := m.startSearchTimer()
+					return m, tea.Batch(searchCmd, toastCmd)
 				}
+
+				return m, toastCmd
 			}
 		case "n":
 			if m.lastSearchTerm == "" {
@@ -191,21 +220,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.clearSearchTimer()
 				m.searchBuffer += msg.String()
 
-				// Update filter
-				m.filteredChannels = m.filterChannels(m.searchBuffer)
-
-				// Reset cursor to first match if available
-				if len(m.filteredChannels) > 0 {
-					m.cursor = 0
-				} else {
-					m.cursor = 0
-				}
-				m.viewportTop = 0
-				m = m.updateViewport()
-
 				var toastCmd tea.Cmd
-				if len(m.filteredChannels) == 0 {
-					m, toastCmd = m.showToast(fmt.Sprintf("No matches for: '%s'", m.searchBuffer))
+
+				// Check if search buffer is numeric - navigate to LCN
+				if m.isNumeric(m.searchBuffer) {
+					lcn, _ := strconv.Atoi(m.searchBuffer)
+					newCursor, found := m.findChannelByLCN(lcn)
+
+					if found {
+						m.cursor = newCursor
+						m = m.updateViewport()
+					} else {
+						m, toastCmd = m.showToast(fmt.Sprintf("Channel %d not found", lcn))
+					}
+				} else {
+					// Text search - update filter
+					m.filteredChannels = m.filterChannels(m.searchBuffer)
+
+					// Reset cursor to first match if available
+					if len(m.filteredChannels) > 0 {
+						m.cursor = 0
+					} else {
+						m.cursor = 0
+					}
+					m.viewportTop = 0
+					m = m.updateViewport()
+
+					if len(m.filteredChannels) == 0 {
+						m, toastCmd = m.showToast(fmt.Sprintf("No matches for: '%s'", m.searchBuffer))
+					}
 				}
 
 				// Save search term when buffer is cleared
@@ -243,6 +286,20 @@ func (m model) updateViewport() model {
 	}
 
 	return m
+}
+
+func (m model) isNumeric(s string) bool {
+	_, err := strconv.Atoi(s)
+	return err == nil
+}
+
+func (m model) findChannelByLCN(lcn int) (int, bool) {
+	for i, channel := range m.filteredChannels {
+		if int(channel.LCN) == lcn {
+			return i, true
+		}
+	}
+	return -1, false
 }
 
 func (m model) filterChannels(query string) []scm.Record {
@@ -387,7 +444,12 @@ func (m model) View() string {
 
 	// show standard status bar
 	if m.searchBuffer != "" {
-		b.WriteString(lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("Filtering: '%s'%s", m.searchBuffer, filterInfo)))
+		if filterInfo != "" {
+			b.WriteString(lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("Filtering: '%s'%s", m.searchBuffer, filterInfo)))
+		} else {
+			b.WriteString(lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("Searching: %s", m.searchBuffer)))
+		}
+
 	} else {
 		helpText := "Press ↑/↓ or j/k to navigate • type to filter • ESC to reset • n for next match • q to quit"
 		b.WriteString(lipgloss.NewStyle().Faint(true).Render(helpText + scrollInfo + filterInfo))
