@@ -12,8 +12,8 @@ import (
 	"github.com/spossner/chansort/internal/scm"
 )
 
-var tuiCmd = &cobra.Command{
-	Use:   "tui",
+var editCmd = &cobra.Command{
+	Use:   "edit",
 	Short: "Interactive channel browser with keyboard navigation",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		recs, err := scm.ReadSatelliteRecords(scmPath)
@@ -33,18 +33,21 @@ var tuiCmd = &cobra.Command{
 }
 
 type model struct {
-	channels         []scm.Record
-	filteredChannels []scm.Record
+	channels         []scm.Channel
+	filteredChannels []scm.Channel
 	cursor           int
 	viewportTop      int
 	height           int
 	searchBuffer     string
 	searchTimer      *time.Timer
 	searchTimerID    int
-	lastSearchTerm   string
 	toastMessage     string
 	toastTimer       *time.Timer
 	toastTimerID     int
+	moveMode         bool
+	moveIndex        int
+	originalChannels []scm.Channel
+	originalCursor   int
 }
 
 type clearSearchMsg struct {
@@ -54,7 +57,7 @@ type clearToastMsg struct {
 	timerID int
 }
 
-func initialModel(channels []scm.Record) model {
+func initialModel(channels []scm.Channel) model {
 	return model{
 		channels:         channels,
 		filteredChannels: channels, // initially show all channels
@@ -64,10 +67,13 @@ func initialModel(channels []scm.Record) model {
 		searchBuffer:     "",
 		searchTimer:      nil,
 		searchTimerID:    0,
-		lastSearchTerm:   "",
 		toastMessage:     "",
 		toastTimer:       nil,
 		toastTimerID:     0,
+		moveMode:         false,
+		moveIndex:        -1,
+		originalChannels: nil,
+		originalCursor:   0,
 	}
 }
 
@@ -83,10 +89,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearSearchMsg:
 		// Only clear if this is the current timer
 		if msg.timerID == m.searchTimerID {
-			// Save search term before clearing buffer
-			if m.searchBuffer != "" {
-				m.lastSearchTerm = m.searchBuffer
-			}
 			m.searchBuffer = ""
 			m = m.clearSearchTimer()
 		}
@@ -100,9 +102,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-		case "esc", "enter":
+		case "esc":
+			if m.moveMode {
+				// Abort move mode - restore original state
+				m.filteredChannels = m.originalChannels
+				m.channels = m.originalChannels
+				m.cursor = m.originalCursor
+				m.moveMode = false
+				m.moveIndex = -1
+				m.originalChannels = nil
+				m = m.updateViewport()
+				return m.showToast("Move cancelled")
+			}
+
 			// Find the currently selected channel in the full list
-			var selectedChannel *scm.Record
+			var selectedChannel *scm.Channel
 			if m.cursor < len(m.filteredChannels) {
 				selectedChannel = &m.filteredChannels[m.cursor]
 			}
@@ -119,7 +133,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			newCursor := 0
 			if selectedChannel != nil {
 				for i, channel := range m.channels {
-					if channel.LCN == selectedChannel.LCN && channel.SlotIndex == selectedChannel.SlotIndex {
+					if channel.ID == selectedChannel.ID && channel.OrderId == selectedChannel.OrderId {
 						newCursor = i
 						break
 					}
@@ -147,13 +161,79 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			m = m.updateViewport()
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+		case "enter":
+			if m.moveMode {
+				// Confirm move mode - keep current state
+				m.moveMode = false
+				m.moveIndex = -1
+				m.originalChannels = nil
+				return m.showToast("Move confirmed")
+			}
+		case "m":
+			if !m.moveMode {
+				// Enter move mode - first reset filtering and prepare state
+
+				// Find the currently selected channel before clearing filter
+				var selectedChannel *scm.Channel
+				if m.cursor < len(m.filteredChannels) {
+					selectedChannel = &m.filteredChannels[m.cursor]
+				}
+
+				// Save original state (full channels list for potential reset)
+				m.originalChannels = make([]scm.Channel, len(m.channels))
+				copy(m.originalChannels, m.channels)
+
+				// Clear filtering and reset to full list
+				m.searchBuffer = ""
+				m.filteredChannels = m.channels
+				m = m.clearSearchTimer()
+
+				// Find selected channel's position in the unfiltered list
+				newCursor := 0
+				if selectedChannel != nil {
+					for i, channel := range m.channels {
+						if channel.ID == selectedChannel.ID && channel.OrderId == selectedChannel.OrderId {
+							newCursor = i
+							break
+						}
+					}
+				}
+
+				// Set move mode state
+				m.cursor = newCursor
+				m.originalCursor = newCursor
+				m.moveMode = true
+				m.moveIndex = newCursor
 				m = m.updateViewport()
 			}
+		case "up", "k":
+			if m.moveMode {
+				if m.cursor > 0 {
+					// Swap current item with the one above
+					m.filteredChannels[m.cursor], m.filteredChannels[m.cursor-1] = m.filteredChannels[m.cursor-1], m.filteredChannels[m.cursor]
+					m.channels[m.cursor], m.channels[m.cursor-1] = m.channels[m.cursor-1], m.channels[m.cursor]
+					m.cursor--
+					m = m.updateViewport()
+				}
+			} else {
+				if m.cursor > 0 {
+					m.cursor--
+					m = m.updateViewport()
+				}
+			}
 		case "down", "j":
-			if m.cursor < len(m.filteredChannels)-1 {
+
+			if m.cursor >= len(m.filteredChannels)-1 {
+				break
+			}
+
+			if m.moveMode {
+				// Swap current item with the one below
+				m.filteredChannels[m.cursor], m.filteredChannels[m.cursor+1] = m.filteredChannels[m.cursor+1], m.filteredChannels[m.cursor]
+				m.channels[m.cursor], m.channels[m.cursor+1] = m.channels[m.cursor+1], m.channels[m.cursor]
+				m.cursor++
+				m = m.updateViewport()
+			} else {
 				m.cursor++
 				m = m.updateViewport()
 			}
@@ -171,15 +251,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewportTop = 0
 					m = m.updateViewport()
 				} else if m.isNumeric(m.searchBuffer) {
-					// Still numeric after backspace - try to navigate to LCN
-					lcn, _ := strconv.Atoi(m.searchBuffer)
-					newCursor, found := m.findChannelByLCN(lcn)
+					// Still numeric after backspace - try to navigate to ID
+					id, _ := strconv.Atoi(m.searchBuffer)
+					newCursor, found := m.findChannelByOrderId(id)
 
 					if found {
 						m.cursor = newCursor
 						m = m.updateViewport()
 					} else {
-						m, toastCmd = m.showToast(fmt.Sprintf("Channel %d not found", lcn))
+						m, toastCmd = m.showToast(fmt.Sprintf("Channel %d not found", id))
 					}
 				} else {
 					// Now text mode - update filter
@@ -200,20 +280,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				return m, toastCmd
 			}
-		case "n":
-			if m.lastSearchTerm == "" {
-				return m.showToast("No previous search term")
-			}
-			newCursor, ok := m.searchNext(m.lastSearchTerm, m.cursor+1)
-			if !ok {
-				return m.showToast("No more matches for '" + m.lastSearchTerm + "'")
-			}
-			wrapped := newCursor < m.cursor
-			m.cursor = newCursor
-			m = m.updateViewport()
-			if wrapped {
-				return m.showToast("Wrapped...")
-			}
 		default:
 			// Handle printable characters for search
 			if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] <= 126 {
@@ -222,16 +288,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				var toastCmd tea.Cmd
 
-				// Check if search buffer is numeric - navigate to LCN
+				// Check if search buffer is numeric - navigate to ID
 				if m.isNumeric(m.searchBuffer) {
-					lcn, _ := strconv.Atoi(m.searchBuffer)
-					newCursor, found := m.findChannelByLCN(lcn)
+					id, _ := strconv.Atoi(m.searchBuffer)
+					newCursor, found := m.findChannelByOrderId(id)
 
 					if found {
 						m.cursor = newCursor
 						m = m.updateViewport()
 					} else {
-						m, toastCmd = m.showToast(fmt.Sprintf("Channel %d not found", lcn))
+						m, toastCmd = m.showToast(fmt.Sprintf("Channel %d not found", id))
 					}
 				} else {
 					// Text search - update filter
@@ -251,8 +317,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 
-				// Save search term when buffer is cleared
-				m.lastSearchTerm = m.searchBuffer
 				m, searchCmd := m.startSearchTimer()
 				return m, tea.Batch(searchCmd, toastCmd)
 			}
@@ -293,22 +357,22 @@ func (m model) isNumeric(s string) bool {
 	return err == nil
 }
 
-func (m model) findChannelByLCN(lcn int) (int, bool) {
+func (m model) findChannelByOrderId(id int) (int, bool) {
 	for i, channel := range m.filteredChannels {
-		if int(channel.LCN) == lcn {
+		if int(channel.OrderId) == id {
 			return i, true
 		}
 	}
 	return -1, false
 }
 
-func (m model) filterChannels(query string) []scm.Record {
+func (m model) filterChannels(query string) []scm.Channel {
 	if query == "" {
 		return m.channels
 	}
 
 	query = strings.ToLower(query)
-	var filtered []scm.Record
+	var filtered []scm.Channel
 
 	for _, channel := range m.channels {
 		if strings.Contains(strings.ToLower(channel.Name), query) {
@@ -317,32 +381,6 @@ func (m model) filterChannels(query string) []scm.Record {
 	}
 
 	return filtered
-}
-
-func (m model) searchNext(query string, start int) (int, bool) {
-	if query == "" {
-		return m.cursor, false
-	}
-
-	query = strings.ToLower(query)
-	channels := m.filteredChannels
-
-	// Search from start position to end
-	for i := start; i < len(channels); i++ {
-		if strings.Contains(strings.ToLower(channels[i].Name), query) {
-			return i, true
-		}
-	}
-
-	// Wrap around: search from beginning to current position
-	for i := 0; i < m.cursor; i++ {
-		if strings.Contains(strings.ToLower(channels[i].Name), query) {
-			return i, true
-		}
-	}
-
-	// No match found, stay at current position
-	return m.cursor, false
 }
 
 func (m model) clearSearchTimer() model {
@@ -382,21 +420,23 @@ func (m model) View() string {
 
 	headerStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("205")).
+		Foreground(lipgloss.Color("46")). // bright green
 		PaddingBottom(1)
 
 	selectedStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("212")).
-		Background(lipgloss.Color("57"))
+		Foreground(lipgloss.Color("0")). // black text
+		Background(lipgloss.Color("46")) // bright green background
 
 	normalStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240"))
+		Foreground(lipgloss.Color("34")) // darker green
 
 	b.WriteString(headerStyle.Render("Samsung TV Channel List"))
 	b.WriteString("\n\n")
-	b.WriteString(fmt.Sprintf("%-4s %-6s %s\n", "LCN", "SLOT", "NAME"))
-	b.WriteString(strings.Repeat("─", 50))
+
+	// Header - always include space for move column
+	b.WriteString(fmt.Sprintf("   %-4s %-6s %s\n", "SLOT", "ID", "NAME"))
+	b.WriteString(strings.Repeat("─", 53))
 	b.WriteString("\n")
 
 	// Calculate visible range for filtered channels
@@ -409,7 +449,13 @@ func (m model) View() string {
 	// Display only visible filtered channels
 	for i := start; i < end; i++ {
 		channel := m.filteredChannels[i]
-		line := fmt.Sprintf("%-4d %-6d %s", channel.LCN, channel.SlotIndex, channel.Name)
+
+		// Always show move column space, with indicator only in move mode
+		moveIndicator := "   "
+		if m.moveMode && i == m.cursor {
+			moveIndicator = "▶︎  "
+		}
+		line := fmt.Sprintf("%s%-4d %-6d %s", moveIndicator, channel.OrderId, channel.ID, channel.Name)
 
 		if i == m.cursor {
 			b.WriteString(selectedStyle.Render(line))
@@ -435,29 +481,31 @@ func (m model) View() string {
 	if m.toastMessage != "" {
 		toastStyle := lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("15")).
-			Background(lipgloss.Color("208")).
+			Foreground(lipgloss.Color("0")).  // black text
+			Background(lipgloss.Color("82")). // bright lime green
 			Padding(0, 1)
 		b.WriteString(toastStyle.Render(m.toastMessage))
 	}
 	b.WriteString("\n")
 
 	// show standard status bar
-	if m.searchBuffer != "" {
+	if m.moveMode {
+		helpText := "MOVE MODE: ↑/↓ to reorder • Enter to confirm • Esc to cancel"
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("82")).Render(helpText + scrollInfo))
+	} else if m.searchBuffer != "" {
 		if filterInfo != "" {
-			b.WriteString(lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("Filtering: '%s'%s", m.searchBuffer, filterInfo)))
+			b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("28")).Render(fmt.Sprintf("Filtering: '%s'%s", m.searchBuffer, filterInfo)))
 		} else {
-			b.WriteString(lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("Searching: %s", m.searchBuffer)))
+			b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("28")).Render(fmt.Sprintf("Searching: %s", m.searchBuffer)))
 		}
-
 	} else {
-		helpText := "Press ↑/↓ or j/k to navigate • type to filter • ESC to reset • n for next match • q to quit"
-		b.WriteString(lipgloss.NewStyle().Faint(true).Render(helpText + scrollInfo + filterInfo))
+		helpText := "Press ↑/↓ or j/k to navigate • type to filter • m to move • ESC to reset • n for next match • q to quit"
+		b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("28")).Render(helpText + scrollInfo + filterInfo))
 	}
 
 	return b.String()
 }
 
 func init() {
-	rootCmd.AddCommand(tuiCmd)
+	rootCmd.AddCommand(editCmd)
 }
