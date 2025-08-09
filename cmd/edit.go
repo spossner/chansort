@@ -46,8 +46,6 @@ type model struct {
 	toastTimerID     int
 	moveMode         bool
 	moveIndex        int
-	originalChannels []scm.Channel
-	originalCursor   int
 }
 
 type clearSearchMsg struct {
@@ -72,8 +70,6 @@ func initialModel(channels []scm.Channel) model {
 		toastTimerID:     0,
 		moveMode:         false,
 		moveIndex:        -1,
-		originalChannels: nil,
-		originalCursor:   0,
 	}
 }
 
@@ -104,15 +100,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "esc":
 			if m.moveMode {
-				// Abort move mode - restore original state
-				m.filteredChannels = m.originalChannels
-				m.channels = m.originalChannels
-				m.cursor = m.originalCursor
+				// Exit move mode (keep current order)
 				m.moveMode = false
 				m.moveIndex = -1
-				m.originalChannels = nil
-				m = m.updateViewport()
-				return m.showToast("Move cancelled")
+				return m.showToast("Move mode exited")
 			}
 
 			// Find the currently selected channel in the full list
@@ -163,10 +154,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.updateViewport()
 		case "enter":
 			if m.moveMode {
-				// Confirm move mode - keep current state
+				// Exit move mode (keep current order)
 				m.moveMode = false
 				m.moveIndex = -1
-				m.originalChannels = nil
 				return m.showToast("Move confirmed")
 			}
 		case "m":
@@ -178,10 +168,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < len(m.filteredChannels) {
 					selectedChannel = &m.filteredChannels[m.cursor]
 				}
-
-				// Save original state (full channels list for potential reset)
-				m.originalChannels = make([]scm.Channel, len(m.channels))
-				copy(m.originalChannels, m.channels)
 
 				// Clear filtering and reset to full list
 				m.searchBuffer = ""
@@ -201,10 +187,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				// Set move mode state
 				m.cursor = newCursor
-				m.originalCursor = newCursor
 				m.moveMode = true
 				m.moveIndex = newCursor
 				m = m.updateViewport()
+				// return m.showToast("Move mode: use ↑/↓ to reorder, Enter to confirm, Esc to exit")
 			}
 		case "up", "k":
 			if m.moveMode {
@@ -251,7 +237,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewportTop = 0
 					m = m.updateViewport()
 				} else if m.isNumeric(m.searchBuffer) {
-					// Still numeric after backspace - try to navigate to ID
+					// Still numeric after backspace - try to navigate to ID with timer
 					id, _ := strconv.Atoi(m.searchBuffer)
 					newCursor, found := m.findChannelByOrderId(id)
 
@@ -261,8 +247,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m, toastCmd = m.showToast(fmt.Sprintf("Channel %d not found", id))
 					}
+
+					// Use timer for numeric input
+					m, searchCmd := m.startSearchTimer()
+					return m, tea.Batch(searchCmd, toastCmd)
 				} else {
-					// Now text mode - update filter
+					// Now text mode - update filter (no timer, persistent filtering)
 					m.filteredChannels = m.filterChannels(m.searchBuffer)
 					m.cursor = 0
 					m.viewportTop = 0
@@ -271,11 +261,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if len(m.filteredChannels) == 0 {
 						m, toastCmd = m.showToast(fmt.Sprintf("No matches for: '%s'", m.searchBuffer))
 					}
-				}
 
-				if m.searchBuffer != "" {
-					m, searchCmd := m.startSearchTimer()
-					return m, tea.Batch(searchCmd, toastCmd)
+					return m, toastCmd
 				}
 
 				return m, toastCmd
@@ -288,7 +275,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				var toastCmd tea.Cmd
 
-				// Check if search buffer is numeric - navigate to ID
+				// Check if search buffer is numeric - navigate to ID with timer
 				if m.isNumeric(m.searchBuffer) {
 					id, _ := strconv.Atoi(m.searchBuffer)
 					newCursor, found := m.findChannelByOrderId(id)
@@ -299,8 +286,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m, toastCmd = m.showToast(fmt.Sprintf("Channel %d not found", id))
 					}
+
+					// Use timer for numeric input (allows multi-digit entry)
+					m, searchCmd := m.startSearchTimer()
+					return m, tea.Batch(searchCmd, toastCmd)
 				} else {
-					// Text search - update filter
+					// Text search - update filter (no timer, persistent filtering)
 					m.filteredChannels = m.filterChannels(m.searchBuffer)
 
 					// Reset cursor to first match if available
@@ -315,10 +306,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if len(m.filteredChannels) == 0 {
 						m, toastCmd = m.showToast(fmt.Sprintf("No matches for: '%s'", m.searchBuffer))
 					}
-				}
 
-				m, searchCmd := m.startSearchTimer()
-				return m, tea.Batch(searchCmd, toastCmd)
+					return m, toastCmd
+				}
 			}
 		}
 	}
@@ -464,6 +454,7 @@ func (m model) View() string {
 		}
 		b.WriteString("\n")
 	}
+	b.WriteString("\n")
 
 	// Add scroll indicator and search info
 	scrollInfo := ""
@@ -485,22 +476,22 @@ func (m model) View() string {
 			Background(lipgloss.Color("82")). // bright lime green
 			Padding(0, 1)
 		b.WriteString(toastStyle.Render(m.toastMessage))
-	}
-	b.WriteString("\n")
-
-	// show standard status bar
-	if m.moveMode {
-		helpText := "MOVE MODE: ↑/↓ to reorder • Enter to confirm • Esc to cancel"
-		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("82")).Render(helpText + scrollInfo))
-	} else if m.searchBuffer != "" {
-		if filterInfo != "" {
-			b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("28")).Render(fmt.Sprintf("Filtering: '%s'%s", m.searchBuffer, filterInfo)))
-		} else {
-			b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("28")).Render(fmt.Sprintf("Searching: %s", m.searchBuffer)))
-		}
 	} else {
-		helpText := "Press ↑/↓ or j/k to navigate • type to filter • m to move • ESC to reset • n for next match • q to quit"
-		b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("28")).Render(helpText + scrollInfo + filterInfo))
+
+		// show standard status bar
+		if m.moveMode {
+			helpText := "MOVE MODE: ↑/↓ to reorder • Enter to confirm • Esc to cancel"
+			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("82")).Render(helpText + scrollInfo))
+		} else if m.searchBuffer != "" {
+			if filterInfo != "" {
+				b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("28")).Render(fmt.Sprintf("Filtering: '%s'%s", m.searchBuffer, filterInfo)))
+			} else {
+				b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("28")).Render(fmt.Sprintf("Searching: %s", m.searchBuffer)))
+			}
+		} else {
+			helpText := "Press ↑/↓ or j/k to navigate • type to filter • m to move • q to quit"
+			b.WriteString(lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("28")).Render(helpText + scrollInfo + filterInfo))
+		}
 	}
 
 	return b.String()
