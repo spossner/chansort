@@ -35,7 +35,6 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
-*.scm
 *.log
 debug
 tmp/
