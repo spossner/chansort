@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/spossner/chansort/internal/scm"
@@ -18,12 +16,7 @@ var editCmd = &cobra.Command{
 			return err
 		}
 
-		channels := scm.SortTVOrder(recs)
-		if len(channels) == 0 {
-			return fmt.Errorf("no channels found in the SCM file")
-		}
-
-		p := tea.NewProgram(tui.NewModel(channels))
+		p := tea.NewProgram(tui.NewModel(scmPath, recs))
 		_, err = p.Run()
 		return err
 	},
@@ -32,4 +25,3 @@ var editCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(editCmd)
 }
-

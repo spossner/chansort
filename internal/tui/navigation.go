@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"fmt"
-
 	"github.com/spossner/chansort/internal/scm"
 )
 
@@ -36,51 +34,24 @@ func (m Model) UpdateViewport() Model {
 	return m
 }
 
-// MoveUp moves the cursor up one position
-func (m Model) MoveUp() Model {
-	if m.Cursor > 0 {
-		m.Cursor--
-		m = m.UpdateViewport()
+func (m Model) calculateNewCursorPosition(delta int) int {
+	return min(max(0, m.Cursor+delta), len(m.FilteredChannels)-1)
+}
+
+func (m Model) MoveCursorBy(delta int) Model {
+	newPosition := m.calculateNewCursorPosition(delta)
+	if m.Cursor == newPosition {
+		return m // no change needed
 	}
+	m.Cursor = newPosition
+	m = m.UpdateViewport()
 	return m
 }
 
-// MoveDown moves the cursor down one position
-func (m Model) MoveDown() Model {
-	if m.Cursor < len(m.FilteredChannels)-1 {
-		m.Cursor++
-		m = m.UpdateViewport()
-	}
-	return m
-}
-
-func (m Model) MoveChannelUp() Model {
-	if m.Mode != ModeMove {
-		fmt.Printf("not in move mode...\n")
-		return m
-	}
-
-	if m.Cursor > 0 {
-		// Swap current item with the one above
-		m.FilteredChannels[m.Cursor], m.FilteredChannels[m.Cursor-1] = m.FilteredChannels[m.Cursor-1], m.FilteredChannels[m.Cursor]
-		m.Channels[m.Cursor], m.Channels[m.Cursor-1] = m.Channels[m.Cursor-1], m.Channels[m.Cursor]
-		m.Cursor--
-		m = m.UpdateViewport()
-	}
-	return m
-}
-
-func (m Model) MoveChannelDown() Model {
-	if m.Mode != ModeMove {
-		return m
-	}
-	if m.Cursor < len(m.FilteredChannels)-1 {
-		// Swap current item with the one below
-		m.FilteredChannels[m.Cursor], m.FilteredChannels[m.Cursor+1] = m.FilteredChannels[m.Cursor+1], m.FilteredChannels[m.Cursor]
-		m.Channels[m.Cursor], m.Channels[m.Cursor+1] = m.Channels[m.Cursor+1], m.Channels[m.Cursor]
-		m.Cursor++
-		m = m.UpdateViewport()
-	}
+func (m Model) MoveChannelBy(delta int) Model {
+	currentPosition := m.Cursor
+	m = m.MoveCursorBy(delta)
+	m = m.MoveChannel(currentPosition, m.Cursor)
 	return m
 }
 
@@ -93,7 +64,7 @@ func (m Model) FindSelectedChannelInFullList() int {
 	selectedChannel := m.FilteredChannels[m.Cursor]
 
 	for i, channel := range m.Channels {
-		if channel.ID == selectedChannel.ID && channel.OrderId == selectedChannel.OrderId {
+		if channel.ID == selectedChannel.ID {
 			return i
 		}
 	}
@@ -121,7 +92,7 @@ func (m Model) ResetToFullList() Model {
 	newCursor := 0
 	if selectedChannel != nil {
 		for i, channel := range m.Channels {
-			if channel.ID == selectedChannel.ID && channel.OrderId == selectedChannel.OrderId {
+			if channel.ID == selectedChannel.ID {
 				newCursor = i
 				break
 			}

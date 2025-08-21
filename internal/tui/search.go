@@ -35,16 +35,6 @@ func (m Model) FilterChannels(query string) []scm.Channel {
 	return filtered
 }
 
-// FindChannelByOrderId finds a channel by its OrderId and returns the index in filtered channels
-func (m Model) FindChannelByOrderId(orderId int) (int, bool) {
-	for i, channel := range m.FilteredChannels {
-		if int(channel.OrderId) == orderId {
-			return i, true
-		}
-	}
-	return -1, false
-}
-
 // ClearSearchTimer stops the current search timer if it exists
 func (m Model) ClearSearchTimer() Model {
 	if m.SearchTimer != nil {

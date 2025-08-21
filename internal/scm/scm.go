@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 )
 
@@ -20,7 +21,7 @@ type Channel struct {
 	ID      int
 	OrderId uint16
 	Name    string
-	Raw     [recordSize]byte
+	Raw     []byte
 }
 
 // ReadSatelliteRecords opens a Samsung .scm archive, extracts map-SateD, and parses fixed-size records.
@@ -58,13 +59,79 @@ func ReadSatelliteRecords(scmArchive string) ([]Channel, error) {
 	n := len(buf) / recordSize
 	recs := make([]Channel, 0, n)
 	for i := 0; i < n; i++ {
-		var raw [recordSize]byte
+		raw := make([]byte, recordSize)
 		copy(raw[:], buf[i*recordSize:(i+1)*recordSize])
 		lcn := uint16(raw[0]) | uint16(raw[1])<<8 // little-endian
 		name := decodeUTF16BEZeroTerm(raw[nameOffset:])
 		recs = append(recs, Channel{ID: i, OrderId: lcn, Name: name, Raw: raw})
 	}
 	return recs, nil
+}
+
+// WriteSatelliteRecords copies the content of a given scm archive with a new sattelite records list into a new output archive. The function clones the original archive and only replaces the eventually modified list of sattelite channels in a probably new order
+func WriteSatelliteRecords(scmArchive string, recs []Channel, outputArchive string) error {
+	// Open the original zip archive
+	zipReader, err := zip.OpenReader(scmArchive)
+	if err != nil {
+		return err
+	}
+	defer zipReader.Close()
+
+	// Create a new zip archive for the output
+	outFile, err := os.Create(outputArchive)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	zipWriter := zip.NewWriter(outFile)
+	defer zipWriter.Close()
+
+	// Copy all files from the original archive to the new archive
+	for _, f := range zipReader.File {
+		if f.Name == mapSateDKey {
+			// Write the modified satellite records to the new archive
+			f, err := zipWriter.Create(mapSateDKey)
+			if err != nil {
+				return err
+			}
+			for _, rec := range recs {
+				if _, err := f.Write(rec.Raw[:]); err != nil {
+					return err
+				}
+			}
+		} else {
+			// Copy the original file
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+
+			fw, err := zipWriter.Create(f.Name)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(fw, rc); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func WriteOrderIdsBackIntoChannelData(recs []Channel) {
+	for _, rec := range recs {
+		rec.Raw[0] = byte(rec.OrderId & 0xFF)        // LSB
+		rec.Raw[1] = byte((rec.OrderId >> 8) & 0xFF) // MSB
+
+		// Recalculate and update checksum (sum of first 167 bytes mod 256)
+		var checksum byte
+		for i := range recordSize - 1 {
+			checksum += rec.Raw[i]
+		}
+		rec.Raw[recordSize-1] = checksum
+	}
 }
 
 // SortTVOrder returns records with non-empty names sorted by LCN then slot index (stable).
